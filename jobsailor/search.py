@@ -14,6 +14,25 @@ from .utils import absolute_url, clean_url, human_pause, job_key
 log = logging.getLogger("jobsailor")
 
 
+CARDS_WAIT_TIMEOUT = 10.0
+
+
+def _load_jobs(driver, search_tier_days: int, timeout: float = None) -> List["Job"]:
+    """Wait until the page has REAL, parseable job cards and return them (empty list if none appear in time).
+
+    Do not just look for the text 'job-listings-' in the page source: Naukri puts it in an embedded data blob long
+    before the cards are drawn, so that check returns too early and every page looks empty."""
+    end = time.time() + (CARDS_WAIT_TIMEOUT if timeout is None else timeout)
+    while True:
+        try:
+            jobs = extract_jobs(driver.page_source, search_tier_days)
+        except Exception:  # noqa: BLE001 - page changing under us
+            jobs = []
+        if jobs or time.time() >= end:
+            return jobs
+        time.sleep(0.4)
+
+
 def slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
@@ -85,15 +104,20 @@ def collect_candidates(driver, tracker, target_pool: int, looks_blocked=None,
                     except Exception as exc:  # noqa: BLE001 - timeouts etc.
                         log.warning("Could not load %s (%s)", url, str(exc)[:80])
                         break
-                    time.sleep(3)
-                    jobs = extract_jobs(driver.page_source, tier_days)
+                    jobs = _load_jobs(driver, tier_days)
                     # Only treat the page as a captcha/block page when it has NO job cards at all.
                     if not jobs and looks_blocked and looks_blocked(driver):
                         log.error("Naukri is showing a captcha / block page. Solve it in the browser, "
                                   "then press Enter here to continue (or Ctrl+C to stop).")
                         input()
-                        jobs = extract_jobs(driver.page_source, tier_days)
+                        jobs = _load_jobs(driver, tier_days)
                     if not jobs:
+                        if page == 1:               # never fail silently: say so
+                            try:
+                                title = driver.title
+                            except Exception:  # noqa: BLE001
+                                title = "?"
+                            log.warning("%-26s exp=%d: NO job cards loaded (page title: %r)", keyword, experience, title)
                         break                       # no more pages for this query
                     new_here = 0
                     for job in jobs:
@@ -114,7 +138,7 @@ def collect_candidates(driver, tracker, target_pool: int, looks_blocked=None,
                             new_here += 1
                     log.info("%-26s exp=%d p%d: %2d cards, %2d new eligible (pool %d)",
                              keyword, experience, page, len(jobs), new_here, len(accepted))
-                    human_pause(1.5, 3.0)
+                    human_pause(0.6, 1.4)
                     if len(accepted) >= target_pool:
                         break
                     if new_here == 0:

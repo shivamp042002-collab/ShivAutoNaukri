@@ -35,14 +35,14 @@ def _env(name, default, cast=str):
 # Gemini (answers the questions Naukri asks after you click "Apply")
 # --------------------------------------------------------------------------
 GEMINI_API_KEY = _env("GEMINI_API_KEY", "")
-# `gemini-flash-latest` is an alias that always points at a live Flash model.
+# Flash-Lite models are the fastest and have the friendliest free-tier limits - plenty for form questions.
 # (The old `gemini-1.5-flash` was shut down by Google in Sept 2025.)
-GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-flash-latest")
-# Tried in order when the main one is overloaded (503) or gone (404).  Lite models are usually less busy.
+GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-flash-lite")
+# Tried in order when the main one is rate-limited (429), overloaded (503) or gone (404).
 GEMINI_FALLBACK_MODELS = _env("GEMINI_FALLBACK_MODELS",
-                              ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"], list)
-GEMINI_TIMEOUT_SECONDS = _env("GEMINI_TIMEOUT_SECONDS", 20, int)              # per API call
-GEMINI_MAX_SECONDS_PER_QUESTION = _env("GEMINI_MAX_SECONDS_PER_QUESTION", 60, int)  # give up on one question after this
+                              ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"], list)
+GEMINI_TIMEOUT_SECONDS = _env("GEMINI_TIMEOUT_SECONDS", 12, int)                    # per API call
+GEMINI_MAX_SECONDS_PER_QUESTION = _env("GEMINI_MAX_SECONDS_PER_QUESTION", 25, int)  # give up on one question after this
 PROFILE_PATH = Path(_env("PROFILE_PATH", str(BASE_DIR / "profile.json")))
 
 # --------------------------------------------------------------------------
@@ -56,41 +56,40 @@ SEARCH_PAGES_PER_QUERY = _env("SEARCH_PAGES_PER_QUERY", 3, int)
 # --------------------------------------------------------------------------
 # What jobs
 # --------------------------------------------------------------------------
-SEARCH_KEYWORDS = _env("SEARCH_KEYWORDS", [
-    "SDE Intern",
-    "Artificial Intelligence Engineer",
-    "AI Engineer",
-    "Implementation Engineer",
-    "Technical Support",
-    "IT application support",
-    "Application support"
-    "Software Developer",
-    "Backend Developer",
-    "Python Developer",
-    "Django Developer",
-    "Full Stack Developer",
-    "Software Engineer",
-    "API Developer",
-   
-    
-], list)
+# "fresher" = you have 0 years of experience  ->  searches Naukri's "0 years" filter, adds fresher-style keywords and
+# allows "Trainee" roles.   "experienced" = 1-3 years.
+CANDIDATE_LEVEL = _env("CANDIDATE_LEVEL", "fresher")
+FRESHER = CANDIDATE_LEVEL.strip().lower().startswith("fresh")
+ALLOW_INTERNSHIPS = _env("ALLOW_INTERNSHIPS", False, bool)    # internships are usually short & stipend-only
+
+_BASE_KEYWORDS = [
+    "Software Developer", "Backend Developer", "Python Developer", "Java Developer", "Node.js Developer",
+    "Django Developer", "Full Stack Developer", "Software Engineer", "API Developer", "Spring Boot Developer",
+]
+_FRESHER_KEYWORDS = [
+    "Fresher Software Developer", "Associate Software Engineer", "Junior Software Developer",
+    "Trainee Software Engineer", "Software Developer Trainee", "Graduate Software Engineer",
+    "Junior Python Developer", "Junior Java Developer", "Entry Level Software Developer",
+]
+# Fresher keywords go FIRST so they get the best use of the per-run page budget.
+SEARCH_KEYWORDS = _env("SEARCH_KEYWORDS", (_FRESHER_KEYWORDS if FRESHER else []) + _BASE_KEYWORDS, list)
 
 # A job title must contain at least one of these words (whole-word match, case-insensitive)...
 TITLE_MUST_CONTAIN_ANY = [
-    "software", "developer", "backend", "back-end", "back end", "programmer", "SDE Intern", "SDE"
-    "python", "django", "flask", "fastapi", "golang","Implementation engineer", "Technical support"
-    "full stack", "full-stack", "fullstack", "sde", "api","qa", "tester", "testing", "devops",
-    "Software Engineer", "Technical", "IT", "AI", "Artificial Intelligence"
+    "software", "developer", "backend", "back-end", "back end", "programmer",
+    "python", "django", "flask", "fastapi", "java", "spring", "node", "golang",
+    "full stack", "full-stack", "fullstack", "sde", ".net", "api",
 ]
 # ...and must NOT contain any of these words.
 TITLE_MUST_NOT_CONTAIN = [
     "senior", "sr", "lead", "principal", "manager", "architect", "head", "director", "staff",
     "sales", "business", "marketing", "seo", "content", "recruiter", "teacher", "executive",
-    "bpo", "customer", "telecaller", "tele caller", "voice", "data entry", "analyst", "data scientist",
+    "bpo", "customer", "telecaller", "tele caller", "voice", "data entry", "support",
+    "qa", "tester", "testing", "devops", "analyst", "data scientist",
     "android", "ios", "mobile", "flutter", "php", "wordpress", "sap", "salesforce", "mainframe",
     "sharepoint", "oracle", "etl", "bi", "power bi", "embedded", "firmware", "vlsi", "hardware",
-    "game", "unity", "quantum", "blockchain", "mechanical", "civil", "electrical",
-]
+    "network", "game", "unity", "quantum", "blockchain", "mechanical", "civil", "electrical",
+] + ([] if ALLOW_INTERNSHIPS else ["intern", "internship"]) + ([] if FRESHER else ["trainee", "fresher batch"])
 BLACKLIST_COMPANIES = _env("BLACKLIST_COMPANIES", [], list)   # e.g. "Infosys,TCS"
 
 # Experience window.  A job is accepted only if
@@ -98,9 +97,9 @@ BLACKLIST_COMPANIES = _env("BLACKLIST_COMPANIES", [], list)   # e.g. "Infosys,TC
 # Default = "0-3 years" and "1-3 years" (and 0-1, 0-2, 1-2 ...), never above 3.
 MAX_ALLOWED_MIN_EXPERIENCE = _env("MAX_ALLOWED_MIN_EXPERIENCE", 1, int)
 MAX_ALLOWED_MAX_EXPERIENCE = _env("MAX_ALLOWED_MAX_EXPERIENCE", 3, int)
-# Naukri's own "experience" search filter = your years of experience.  We search
-# with each value so jobs of 0-1, 0-3, 1-3 ... all show up.
-SEARCH_EXPERIENCE_VALUES = [int(x) for x in _env("SEARCH_EXPERIENCE_VALUES", ["1", "2"], list)]
+# Naukri's own "experience" search filter = YOUR years of experience.  Fresher -> 0 and 1, so jobs of
+# 0-1, 0-2, 0-3 and 1-3 all show up.
+SEARCH_EXPERIENCE_VALUES = [int(x) for x in _env("SEARCH_EXPERIENCE_VALUES", ["0", "1"] if FRESHER else ["1", "2"], list)]
 
 # Recency: look at the last 24 hours FIRST, then widen to the last 7 days.
 RECENCY_TIERS_DAYS = [1, 7]
@@ -130,5 +129,7 @@ GECKODRIVER_PATH = _env("GECKODRIVER_PATH", "")        # blank = Selenium downlo
 # Persistent Firefox profile so you only log in once.  Blank = ./data/firefox_profile
 FIREFOX_PROFILE_DIR = Path(_env("FIREFOX_PROFILE_DIR", str(DATA_DIR / "firefox_profile")))
 PAGE_LOAD_TIMEOUT = 30
-MIN_DELAY, MAX_DELAY = 1.0, 3.0                        # random human-like pause between jobs (seconds)
+MIN_DELAY, MAX_DELAY = 2.0, 5.0                        # random human-like pause between jobs (seconds)
 MAX_QUESTIONS_PER_JOB = 15                             # give up on a job if the chatbot asks more than this
+MAX_SECONDS_PER_JOB = 180                              # hard time limit for one application
+DEBUG_DIR = DATA_DIR / "debug"                         # page dumps + screenshots of failed applications

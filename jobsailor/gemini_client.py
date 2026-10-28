@@ -4,12 +4,12 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 import config
+from .quick_answers import Answer, quick_answer
 from .utils import normalize
 
 log = logging.getLogger("jobsailor")
@@ -34,13 +34,6 @@ Rules:
 
 PROFILE (JSON):
 """
-
-
-@dataclass
-class Answer:
-    text: str = ""
-    indexes: Optional[List[int]] = None       # 1-based option numbers for choice questions
-    source: str = "gemini"                    # gemini | cache | profile
 
 
 # ---------------------------------------------------------------- pure helpers (unit-tested)
@@ -99,6 +92,8 @@ class GeminiAnswerer:
         self.client = client
         self._api_key = api_key
         self.calls = 0
+        self.cooldown = {}            # model -> time until which we do not call it (rate-limited)
+        self.dead = set()             # models Google says no longer exist for us
 
         profile_for_prompt = {k: v for k, v in self.profile.items() if k != "answers"}
         self.system_instruction = SYSTEM_PROMPT + json.dumps(profile_for_prompt, ensure_ascii=False, indent=1)
@@ -158,10 +153,14 @@ class GeminiAnswerer:
         return (resp.text or "").strip()
 
     def _ask_model(self, prompt: str) -> str:
-        """Try each model quickly: 2 attempts on a busy model, then move on.  Hard time limit per question."""
+        """Fail FAST.  A rate-limited (429) model is skipped for a while instead of being retried; busy (503) models
+        get one short retry.  Never spends more than GEMINI_MAX_SECONDS_PER_QUESTION on a single question."""
         deadline = time.time() + config.GEMINI_MAX_SECONDS_PER_QUESTION
+        usable = [m for m in self.models if m not in self.dead and self.cooldown.get(m, 0) <= time.time()]
+        if not usable:
+            raise RuntimeError("Gemini is rate-limited right now (all models cooling down) - skipping the API for a moment")
         last_exc = None
-        for model in self.models:
+        for model in usable:
             for attempt in range(2):
                 if time.time() > deadline:
                     raise RuntimeError(f"Gemini did not answer within {config.GEMINI_MAX_SECONDS_PER_QUESTION}s. "
@@ -176,13 +175,19 @@ class GeminiAnswerer:
                     if "api key" in msg or "api_key" in msg or "permission_denied" in msg or "unauthenticated" in msg:
                         raise RuntimeError(f"Gemini rejected the API key / permissions: {exc}") from exc
                     if "not found" in msg or "404" in msg or "no longer available" in msg:
-                        log.warning("Gemini model '%s' is not available - trying the next one", model)
+                        log.warning("Gemini model '%s' is not available - skipping it", model)
+                        self.dead.add(model)
                         break                       # next model
-                    # 503 overloaded / 429 rate limit / timeout: one short retry, then next model
+                    if "429" in msg or "resource_exhausted" in msg or "quota" in msg:
+                        daily = any(w in msg for w in ("per day", "daily", "limit: 0"))
+                        self.cooldown[model] = time.time() + (1800 if daily else 60)
+                        log.warning("Gemini '%s' rate-limited (free-tier quota) - trying another model", model)
+                        break                       # next model, no waiting
+                    # 503 overloaded / timeout: one very short retry, then next model
                     if attempt == 0:
-                        log.warning("Gemini '%s' busy (%s). Retrying once...", model, str(exc)[:60])
-                        time.sleep(2)
+                        time.sleep(0.8)
                     else:
+                        self.cooldown[model] = time.time() + 20
                         log.warning("Gemini '%s' still busy - switching model", model)
         raise RuntimeError(f"All Gemini models failed. Last error: {str(last_exc)[:200]}")
 
@@ -208,13 +213,19 @@ class GeminiAnswerer:
                 self._log_qa(question, options, ans)
                 return ans
 
-        # 2) cache
+        # 2) instant offline rules (profile-based) - no API call, no waiting
+        rule = quick_answer(question, options, self.profile, multi)
+        if rule is not None:
+            self._log_qa(question, options, rule)
+            return rule
+
+        # 3) cache
         cache_key = normalize(question) + "||" + "|".join(normalize(o) for o in options) + ("||m" if multi else "")
         if cache_key in self.cache:
             c = self.cache[cache_key]
             return Answer(text=c.get("text", ""), indexes=c.get("indexes"), source="cache")
 
-        # 3) Gemini
+        # 4) Gemini
         skip_idx = {i for i, o in enumerate(options, 1) if normalize(o).startswith("skip")}
         if options:
             listing = "\n".join(f"{i}. {o}" for i, o in enumerate(options, 1) if i not in skip_idx or len(skip_idx) == len(options))

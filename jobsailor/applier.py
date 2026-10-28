@@ -60,6 +60,8 @@ TEXT_INPUT_XPATHS = [
     "//div[@class='textArea']",
     "//div[@contenteditable='true']",
     "//input[contains(@class,'chatbot') and @type='text']",
+    "//div[contains(@class,'chatbot')]//textarea",
+    "//div[contains(@class,'chatbot')]//input[not(@type='hidden') and not(@type='radio') and not(@type='checkbox')]",
 ]
 SAVE_BUTTON_XPATHS = [
     "//div[contains(@class,'sendMsg')]",
@@ -69,6 +71,13 @@ SAVE_BUTTON_XPATHS = [
     "/html/body/div[2]/div/div[1]/div[3]/div/div",          # the original script's absolute path (last resort)
 ]
 JD_CSS = [".styles_JDC__dang-inner-html__h0K4t", ".job-desc", "[class*='job-desc']", "[class*='dang-inner-html']"]
+
+
+# how long we are willing to wait for each thing - we poll every ~0.2s and move on the moment it appears
+JOB_READY_TIMEOUT = 6.0
+AFTER_APPLY_TIMEOUT = 8.0
+NEXT_STATE_TIMEOUT = 4.0
+POLL = 0.2
 
 
 @dataclass
@@ -134,16 +143,74 @@ def _job_description(driver) -> str:
 
 
 # ------------------------------------------------------------------ chatbot questions
-def _click_save(driver) -> bool:
-    for xp in SAVE_BUTTON_XPATHS:
-        try:
-            WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.XPATH, xp)))
-            el = driver.find_element(By.XPATH, xp)
-            _js_click(driver, el)
-            return True
-        except (TimeoutException, WebDriverException):
-            continue
-    return False
+def _click_save(driver, timeout: float = 3.0) -> bool:
+    end = time.time() + timeout
+    while True:
+        for xp in SAVE_BUTTON_XPATHS:
+            try:
+                els = [e for e in driver.find_elements(By.XPATH, xp) if _safe_displayed(e)]
+                if els:
+                    _js_click(driver, els[0])
+                    return True
+            except StaleElementReferenceException:
+                continue
+            except WebDriverException:
+                continue
+        if time.time() >= end:
+            return False
+        time.sleep(POLL)
+
+
+def _chat_state(driver):
+    """(number of bot messages, text of the last one) - changes whenever the chatbot moves on."""
+    try:
+        items = driver.find_elements(By.XPATH, "//li[contains(@class,'botItem')]")
+        return len(items), (items[-1].text.strip() if items else "")
+    except WebDriverException:
+        return 0, ""
+
+
+def _wait_next_state(driver, before, timeout: float = None) -> str:
+    """After answering: wait only until the chatbot shows the next message (or success)."""
+    end = time.time() + (NEXT_STATE_TIMEOUT if timeout is None else timeout)
+    while time.time() < end:
+        if _success_visible(driver):
+            return "success"
+        if _chat_state(driver) != before:
+            return "changed"
+        time.sleep(0.15)
+    return "timeout"
+
+
+def _wait_job_ready(driver, timeout: float = None) -> None:
+    """Wait until the job page has an Apply button / 'already applied' / 'expired' / 'company site' marker."""
+    end = time.time() + (JOB_READY_TIMEOUT if timeout is None else timeout)
+    probes = ALREADY_APPLIED_XPATHS + EXPIRED_XPATHS + EXTERNAL_XPATHS + APPLY_BUTTON_XPATHS
+    while time.time() < end:
+        if _find_any(driver, probes):
+            return
+        time.sleep(POLL)
+
+
+def _chat_ui_visible(driver) -> bool:
+    if _chat_state(driver)[0] > 0:
+        return True
+    radios, checks, chips = _choice_widgets(driver)
+    return bool(radios or checks or chips or _find_any(driver, TEXT_INPUT_XPATHS))
+
+
+def _wait_after_apply(driver, handles_before, timeout: float = None) -> str:
+    """After clicking Apply: 'success' | 'newtab' | 'question' | 'timeout' - returns the moment one happens."""
+    end = time.time() + (AFTER_APPLY_TIMEOUT if timeout is None else timeout)
+    while time.time() < end:
+        if _success_visible(driver):
+            return "success"
+        if set(driver.window_handles) - handles_before:
+            return "newtab"
+        if _chat_ui_visible(driver):
+            return "question"
+        time.sleep(POLL)
+    return "timeout"
 
 
 def _current_question(driver) -> str:
@@ -201,7 +268,7 @@ def _answer_one_question(driver, answerer) -> Optional[bool]:
             driver.execute_script("arguments[0].click();", inp)
         log.info("   A: %s  (%s)", ans.text, ans.source)
         if needs_save:
-            time.sleep(0.4)
+            time.sleep(0.15)
             _click_save(driver)
         return True
 
@@ -218,7 +285,7 @@ def _answer_one_question(driver, answerer) -> Optional[bool]:
             pass
         text_input.send_keys(ans.text)
         log.info("   A: %s  (%s)", ans.text, ans.source)
-        time.sleep(0.5)
+        time.sleep(0.15)
         if not _click_save(driver):
             from selenium.webdriver.common.keys import Keys
             text_input.send_keys(Keys.ENTER)
@@ -232,23 +299,25 @@ def _answer_questions(driver, answerer) -> ApplyResult:
     seen = Counter()
     idle = 0
     stale = 0
-    for _ in range(config.MAX_QUESTIONS_PER_JOB * 3):
+    deadline = time.time() + config.MAX_SECONDS_PER_JOB
+    while time.time() < deadline:
         if _success_visible(driver):
             return ApplyResult(APPLIED, "", answered)
         question = _current_question(driver)
+        before = _chat_state(driver)
         try:
             outcome = _answer_one_question(driver, answerer)
         except StaleElementReferenceException:     # page re-rendered under us - just look again
             stale += 1
             if stale > 4:
                 return ApplyResult(FAILED, "page kept changing (stale element)", answered)
-            time.sleep(0.8)
+            time.sleep(0.3)
             continue
         if outcome is None:                       # nothing to answer yet
             idle += 1
-            if idle >= 8:
+            if idle >= 35:                        # ~8 seconds of nothing
                 return ApplyResult(FAILED, "no success message and no recognisable question", answered)
-            time.sleep(0.8)
+            time.sleep(POLL)
             continue
         idle = 0
         if outcome is False:
@@ -259,9 +328,37 @@ def _answer_questions(driver, answerer) -> ApplyResult:
             return ApplyResult(FAILED, f"question keeps repeating: {question[:90]}", answered)
         if answered > config.MAX_QUESTIONS_PER_JOB:
             return ApplyResult(FAILED, "too many questions", answered)
-        if _wait_success(driver, 1.5):
+        if _wait_next_state(driver, before) == "success":
             return ApplyResult(APPLIED, "", answered)
-    return ApplyResult(FAILED, "gave up answering questions", answered)
+    return ApplyResult(FAILED, "timed out answering questions", answered)
+
+
+def _dump_debug(driver, job, reason: str) -> None:
+    """Save the page + screenshot of a failed application so the cause can be diagnosed."""
+    try:
+        config.DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        if len(list(config.DEBUG_DIR.glob("*"))) > 90:          # keep the folder small
+            return
+        stem = f"{job.job_id or 'job'}_{int(time.time())}"
+        base = config.DEBUG_DIR / stem
+        try:
+            (base.with_suffix(".html")).write_text(driver.page_source, encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            driver.save_screenshot(str(base.with_suffix(".png")))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            items = driver.find_elements(By.XPATH, "//li[contains(@class,'botItem')]")
+            lines = [f"reason: {reason}", f"url: {job.url}", "", "chat messages (last 8):"]
+            lines += [f" - {i.text.strip()}" for i in items[-8:]]
+            (base.with_suffix(".txt")).write_text("\n".join(lines), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("   (debug files saved: %s.*)", base)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _verify_applied(driver, url: str) -> bool:
@@ -272,11 +369,15 @@ def _verify_applied(driver, url: str) -> bool:
         pass
     except WebDriverException:
         return False
-    time.sleep(2.5)
+    end = time.time() + 4
     try:
-        return _find_any(driver, ALREADY_APPLIED_XPATHS) is not None
+        while time.time() < end:
+            if _find_any(driver, ALREADY_APPLIED_XPATHS):
+                return True
+            time.sleep(POLL)
     except WebDriverException:
-        return False
+        pass
+    return False
 
 
 # ------------------------------------------------------------------ main entry
@@ -285,6 +386,7 @@ def apply_to_job(driver, job, answerer, dry_run: bool = False) -> ApplyResult:
     state = {"clicked": False}
     result = _apply_flow(driver, job, answerer, dry_run, state)
     if result.status == FAILED and state["clicked"]:
+        _dump_debug(driver, job, result.detail)                  # before we navigate away
         # A "failure" after clicking Apply may still have succeeded (success banner missed / page re-rendered).
         if _verify_applied(driver, job.url):
             return ApplyResult(APPLIED, f"confirmed on re-check (was: {result.detail[:60]})", result.questions)
@@ -298,7 +400,7 @@ def _apply_flow(driver, job, answerer, dry_run: bool, state: dict) -> ApplyResul
         pass                                      # page partly loaded is usually fine
     except WebDriverException as exc:
         return ApplyResult(FAILED, f"page load error: {str(exc)[:80]}")
-    time.sleep(2.5)
+    _wait_job_ready(driver)
 
     try:
         if _find_any(driver, ALREADY_APPLIED_XPATHS):
@@ -324,12 +426,11 @@ def _apply_flow(driver, job, answerer, dry_run: bool, state: dict) -> ApplyResul
         state["clicked"] = True
         _js_click(driver, button)
 
-        # quick success (no questions) ...
-        if _wait_success(driver, 4):
+        outcome = _wait_after_apply(driver, handles_before)       # returns the moment something happens
+        if outcome == "success":                                  # applied with no questions
             return ApplyResult(APPLIED, "", 0)
-        # ... apply opened the company website in a new tab
-        new_tabs = set(driver.window_handles) - handles_before
-        if new_tabs:
+        new_tabs = set(driver.window_handles) - handles_before    # apply opened the company website
+        if outcome == "newtab" and new_tabs:
             for h in new_tabs:
                 driver.switch_to.window(h)
                 driver.close()

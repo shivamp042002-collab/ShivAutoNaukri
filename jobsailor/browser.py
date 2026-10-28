@@ -3,6 +3,7 @@ import logging
 import time
 
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
@@ -19,6 +20,7 @@ def make_driver(headless: bool = None):
         options.binary_location = config.FIREFOX_BINARY
     if config.HEADLESS if headless is None else headless:
         options.add_argument("-headless")
+    options.page_load_strategy = "eager"      # don't wait for every ad/tracker image - much faster page loads
     options.add_argument("-width=1400")
     options.add_argument("-height=1000")
 
@@ -34,6 +36,18 @@ def make_driver(headless: bool = None):
     driver = webdriver.Firefox(service=service, options=options)
     driver.set_page_load_timeout(config.PAGE_LOAD_TIMEOUT)
     return driver
+
+
+def safe_get(driver, url: str) -> None:
+    """driver.get() that survives a slow page: on timeout, stop loading and carry on with what has rendered."""
+    try:
+        driver.get(url)
+    except TimeoutException:
+        log.warning("Slow page (%s) - continuing with what has loaded", url[:70])
+        try:
+            driver.execute_script("window.stop();")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _is_logged_in(driver) -> bool:
@@ -53,7 +67,7 @@ def _is_logged_in(driver) -> bool:
 
 def ensure_logged_in(driver, interactive: bool = True) -> bool:
     """Open Naukri; if not logged in, let the human log in once (profile remembers it)."""
-    driver.get("https://www.naukri.com/mnjuser/homepage")
+    safe_get(driver, "https://www.naukri.com/mnjuser/homepage")
     time.sleep(4)
     if _is_logged_in(driver):
         log.info("Naukri: already logged in.")
@@ -67,9 +81,9 @@ def ensure_logged_in(driver, interactive: bool = True) -> bool:
     print(" (Only needed once - the login is remembered in data/firefox_profile)")
     print(" When you see your Naukri home page, come back here and press Enter.")
     print("=" * 60)
-    driver.get("https://www.naukri.com/nlogin/login")
+    safe_get(driver, "https://www.naukri.com/nlogin/login")
     input("Press Enter after logging in... ")
-    driver.get("https://www.naukri.com/mnjuser/homepage")
+    safe_get(driver, "https://www.naukri.com/mnjuser/homepage")
     time.sleep(3)
     ok = _is_logged_in(driver)
     log.info("Naukri login %s.", "confirmed" if ok else "NOT detected")
