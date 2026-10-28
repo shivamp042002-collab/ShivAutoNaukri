@@ -1,0 +1,16 @@
+# secrets & personal data - never upload these
+.env
+profile.json
+data/*
+!data/.gitkeep
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+geckodriver.log

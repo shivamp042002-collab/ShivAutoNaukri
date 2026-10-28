@@ -1,0 +1,35 @@
+{
+  "name": "Your Full Name",
+  "email": "you@example.com",
+  "phone": "9999999999",
+  "current_location": "Mumbai",
+  "preferred_locations": ["Mumbai", "Pune", "Bengaluru", "Remote"],
+  "willing_to_relocate": true,
+  "total_experience_years": 2,
+  "current_company": "Your Company",
+  "current_role": "Software Developer",
+  "current_ctc_lpa": 6,
+  "expected_ctc_lpa": 9,
+  "notice_period_days": 30,
+  "highest_education": "B.E. / B.Tech in Computer Engineering",
+  "graduation_year": 2023,
+  "skills": ["Python", "Django", "REST API", "SQL", "PostgreSQL", "Git", "Docker", "AWS"],
+  "skill_experience_years": {
+    "Python": 2,
+    "Django": 2,
+    "REST API": 2,
+    "SQL": 2,
+    "Docker": 1,
+    "AWS": 1
+  },
+  "summary": "Backend developer with 2 years of experience building REST APIs with Python and Django.",
+
+  "answers": {
+    "notice period": "30",
+    "current ctc": "6",
+    "expected ctc": "9",
+    "date of birth": "01/01/2000",
+    "relocate": "Yes",
+    "work from office": "Yes"
+  }
+}
