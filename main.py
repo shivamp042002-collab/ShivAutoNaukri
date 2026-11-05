@@ -72,7 +72,7 @@ def main() -> int:
     from jobsailor.runner import run_applications
     from jobsailor.browser import ensure_logged_in, looks_blocked, make_driver
     from jobsailor.gemini_client import GeminiAnswerer
-    from jobsailor.search import collect_candidates
+    from jobsailor.search import CandidateSource
 
     tracker = Tracker()
     answerer = GeminiAnswerer(config.GEMINI_API_KEY, profile)
@@ -87,7 +87,8 @@ def main() -> int:
             return 1
 
         pool_target = int(max_apply * 1.5) + 5   # collect extra: some will be expired / external / fail
-        candidates = collect_candidates(driver, tracker, pool_target, looks_blocked, keywords=keywords)
+        source = CandidateSource(driver, tracker, looks_blocked, keywords=keywords)
+        candidates = source.fetch_more(pool_target)
         log.info("Candidates ready: %d (newest first)", len(candidates))
 
         if args.dry_run:
@@ -100,7 +101,7 @@ def main() -> int:
             log.info("Dry run finished - %d candidates written to %s", len(candidates), out)
             return 0
 
-        run_applications(driver, candidates, tracker, answerer, max_apply, stats=stats,
+        run_applications(driver, candidates, tracker, answerer, max_apply, stats=stats, source=source,
                          pause=lambda: human_pause(config.MIN_DELAY, config.MAX_DELAY))
 
     except KeyboardInterrupt:

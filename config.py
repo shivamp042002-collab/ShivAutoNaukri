@@ -48,10 +48,14 @@ PROFILE_PATH = Path(_env("PROFILE_PATH", str(BASE_DIR / "profile.json")))
 # --------------------------------------------------------------------------
 # How many jobs
 # --------------------------------------------------------------------------
-MAX_APPLY_PER_RUN = _env("MAX_APPLY_PER_RUN", 50, int)      # target successful applications per run
-MAX_JOB_PAGES_TO_OPEN = _env("MAX_JOB_PAGES_TO_OPEN", 200, int)  # safety cap on job pages visited per run
+MAX_APPLY_PER_RUN = _env("MAX_APPLY_PER_RUN", 70, int)      # target successful applications per run
+MAX_JOB_PAGES_TO_OPEN = _env("MAX_JOB_PAGES_TO_OPEN", 400, int)  # safety cap on job pages visited per run
 MAX_RETRY_FAILED = _env("MAX_RETRY_FAILED", 2, int)          # a job that failed is retried at most this many times
-SEARCH_PAGES_PER_QUERY = _env("SEARCH_PAGES_PER_QUERY", 3, int)
+SEARCH_PAGES_PER_QUERY = _env("SEARCH_PAGES_PER_QUERY", 3, int)   # round 1: pages 1..3 of every keyword
+SEARCH_DEEP_PAGES = _env("SEARCH_DEEP_PAGES", 8, int)           # round 2 goes down to this page
+SEARCH_DEEPEST_PAGES = _env("SEARCH_DEEPEST_PAGES", 15, int)    # round 3 goes down to this page
+SEARCH_DRY_PAGES_STOP = _env("SEARCH_DRY_PAGES_STOP", 3, int)   # stop a query after this many pages with nothing new
+MAX_CONSECUTIVE_FAILURES = _env("MAX_CONSECUTIVE_FAILURES", 12, int)  # stop early if Naukri/Gemini is clearly broken
 
 # --------------------------------------------------------------------------
 # What jobs
@@ -62,33 +66,63 @@ CANDIDATE_LEVEL = _env("CANDIDATE_LEVEL", "fresher")
 FRESHER = CANDIDATE_LEVEL.strip().lower().startswith("fresh")
 ALLOW_INTERNSHIPS = _env("ALLOW_INTERNSHIPS", False, bool)    # internships are usually short & stipend-only
 
+# Wide net: any tech role a fresher can do.  (Java / PHP / .NET / React / Spring Boot are excluded in the title
+# filter below, so they are not searched for.)
 _BASE_KEYWORDS = [
-    "Software Developer", "Backend Developer", "Python Developer", "Java Developer", "Node.js Developer",
-    "Django Developer", "Full Stack Developer", "Software Engineer", "API Developer", "Spring Boot Developer",
+    "Python Developer", "Software Developer", "Software Engineer", "Backend Developer",
+    "Application Support Engineer", "Technical Support Engineer", "Implementation Engineer",
+    "Production Support Engineer", "Software Support Engineer", "Associate Software Engineer",
+    "Django Developer", "Data Engineer", "Automation Engineer",
+    "Test Engineer", "QA Engineer", "DevOps Engineer", "Cloud Support Engineer", "SQL Developer",
+    "Full Stack Developer", "Web Developer", "Solutions Engineer", "Systems Engineer", "IT Support Engineer",
+    "Technical Associate", "API Developer", "Integration Engineer",
 ]
 _FRESHER_KEYWORDS = [
-    "Fresher Software Developer", "Associate Software Engineer", "Junior Software Developer",
-    "Trainee Software Engineer", "Software Developer Trainee", "Graduate Software Engineer",
-    "Junior Python Developer", "Junior Java Developer", "Entry Level Software Developer",
+    "Fresher Software Developer", "Trainee Software Engineer", "Junior Software Developer",
+    "Software Developer Trainee", "Graduate Software Engineer", "Junior Python Developer",
+    "Entry Level Software Engineer", "Fresher Python Developer", "Fresher Application Support Engineer",
 ]
 # Fresher keywords go FIRST so they get the best use of the per-run page budget.
 SEARCH_KEYWORDS = _env("SEARCH_KEYWORDS", (_FRESHER_KEYWORDS if FRESHER else []) + _BASE_KEYWORDS, list)
+# Used only in the deeper search rounds, when the first rounds did not give enough jobs.
+EXTRA_KEYWORDS = _env("EXTRA_KEYWORDS", [
+    "Software Engineer Trainee", "Application Developer", "Python Backend Developer", "Golang Developer",
+    "Programmer", "SDE 1", "Software Engineer 1", "Backend Engineer", "Junior Backend Developer",
+    "Flask Developer", "FastAPI Developer", "Associate Software Developer", "Software Trainee",
+    "Technical Support Executive", "L1 Support Engineer", "L2 Support Engineer", "Application Engineer",
+    "Customer Success Engineer", "Technical Consultant", "ETL Developer", "Big Data Engineer",
+    "Machine Learning Engineer", "AI Engineer", "Python Automation Engineer", "Cloud Engineer", "AWS Engineer",
+    "Linux Administrator", "System Administrator", "Database Administrator", "Support Analyst",
+    "Product Support Engineer", "Technical Trainee", "Web Application Developer",
+], list)
 
-# A job title must contain at least one of these words (whole-word match, case-insensitive)...
+# A job title must contain at least one of these (whole word / phrase, case-insensitive)...
 TITLE_MUST_CONTAIN_ANY = [
-    "software", "developer", "backend", "back-end", "back end", "programmer",
-    "python", "django", "flask", "fastapi", "java", "spring", "node", "golang",
-    "full stack", "full-stack", "fullstack", "sde", ".net", "api",
+    "software", "developer", "programmer", "backend", "back-end", "back end", "python", "django", "flask",
+    "fastapi", "node", "golang", "full stack", "full-stack", "fullstack", "sde", "api", "web",
+    "implementation", "integration", "application support", "application engineer", "technical support",
+    "support engineer", "support analyst", "it support", "technical associate", "technical consultant",
+    "solutions engineer", "systems engineer", "system engineer", "system administrator", "linux", "cloud",
+    "devops", "aws", "qa", "test engineer", "tester", "testing", "automation", "sql", "database",
+    "data engineer", "data analyst", "etl", "big data", "machine learning", "ai engineer", "l1", "l2",
+    "production support", "software trainee", "technical trainee", "noc",
 ]
 # ...and must NOT contain any of these words.
-TITLE_MUST_NOT_CONTAIN = [
+# 1) Stacks you do NOT want:  java, php, .net, react, spring boot   (edit here or EXCLUDED_TECH in .env)
+EXCLUDED_TECH = _env("EXCLUDED_TECH", [
+    "java", "j2ee", "jsp", "hibernate", "spring", "springboot", "php", "laravel", ".net", "dotnet", "asp.net",
+    "vb.net", "c#", "react", "reactjs", "react.js", "react native",
+], list)
+# 2) Not tech / too senior / not a fit
+TITLE_MUST_NOT_CONTAIN = EXCLUDED_TECH + [
     "senior", "sr", "lead", "principal", "manager", "architect", "head", "director", "staff",
-    "sales", "business", "marketing", "seo", "content", "recruiter", "teacher", "executive",
-    "bpo", "customer", "telecaller", "tele caller", "voice", "data entry", "support",
-    "qa", "tester", "testing", "devops", "analyst", "data scientist",
-    "android", "ios", "mobile", "flutter", "php", "wordpress", "sap", "salesforce", "mainframe",
-    "sharepoint", "oracle", "etl", "bi", "power bi", "embedded", "firmware", "vlsi", "hardware",
-    "network", "game", "unity", "quantum", "blockchain", "mechanical", "civil", "electrical",
+    "sales", "business", "marketing", "seo", "content", "recruiter", "teacher", "hr", "accounts", "accountant",
+    "finance", "financial", "admin", "receptionist", "driver", "warehouse", "logistics",
+    "bpo", "customer", "telecaller", "tele caller", "voice", "non voice", "non-voice", "data entry",
+    "chat support", "email support", "process associate", "wordpress", "sap", "salesforce", "mainframe",
+    "sharepoint", "embedded", "firmware", "vlsi", "hardware", "game", "unity", "quantum",
+    "mechanical", "civil", "electrical", "electronics", "chemical", "production engineer", "site engineer",
+    "field engineer", "service engineer", "maintenance", "instrumentation", "automobile", "textile",
 ] + ([] if ALLOW_INTERNSHIPS else ["intern", "internship"]) + ([] if FRESHER else ["trainee", "fresher batch"])
 BLACKLIST_COMPANIES = _env("BLACKLIST_COMPANIES", [], list)   # e.g. "Infosys,TCS"
 
