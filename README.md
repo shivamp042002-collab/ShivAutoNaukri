@@ -1,4 +1,4 @@
-# ShivAutoJob
+# ShivAutoNaukari
 
 Auto-apply bot for **Naukri.com**. It searches for **recent** software / backend developer jobs that ask for
 **0–3 years** of experience, applies to them, answers the extra questions Naukri asks using the **Gemini API**, and
